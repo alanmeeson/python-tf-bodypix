@@ -548,6 +548,65 @@ class ReplaceBackgroundApp(AbstractWebcamFilterApp):
         return output
 
 
+class BodgedReplaceBackgroundApp(AbstractWebcamFilterApp):
+
+    def __init__(self, *args, **kwargs):
+        self.background_image_iterator = None
+        self._cached_mask = None
+        self._mask_decay_count = 0
+        self._mask_decay_max = 10
+
+        self._cached_background_array = None
+        self._cached_background_size = None
+
+        super().__init__(*args, **kwargs)
+
+    def get_next_background_image(self, image_array: np.ndarray) -> np.ndarray:
+        if self.background_image_iterator is None:
+            background_image_source = self.exit_stack.enter_context(get_image_source(
+                self.args.background,
+                image_size=get_image_size(image_array)
+            ))
+            self.background_image_iterator = iter(cycle(background_image_source))
+        return next(self.background_image_iterator)
+
+    def get_output_image(self, image_array: np.ndarray) -> np.ndarray:
+        background_image_array = self.get_next_background_image(image_array)
+
+        if self._cached_mask is None or self._mask_decay_count <= 0:
+            result = self.get_bodypix_result(image_array)
+            self.timer.on_step_start('get_mask')
+            mask = self.get_mask(result)
+            self.timer.on_step_start('compose')
+
+            self._cached_mask = mask
+            self._mask_decay_count = self._mask_decay_max
+        else:
+            mask = self._cached_mask
+
+        input_size = get_image_size(image_array)
+        if self._cached_background_array is None \
+                or self._cached_background_size is None or \
+                self._cached_background_size != input_size:
+
+            background_image_array = resize_image_to(
+                background_image_array, input_size
+            )
+            self._cached_background_array = background_image_array
+            self._cached_background_size = input_size
+
+        else:
+            background_image_array = self._cached_background_array
+
+        output = np.clip(
+            background_image_array * (1 - mask)
+            + image_array * mask,
+            0.0, 255.0
+        )
+        self._mask_decay_count = self._mask_decay_count - 1
+        return output
+
+
 class ReplaceBackgroundSubCommand(AbstractWebcamFilterSubCommand):
     def __init__(self):
         super().__init__("replace-background", "Replaces the background of a person")
@@ -566,7 +625,7 @@ class ReplaceBackgroundSubCommand(AbstractWebcamFilterSubCommand):
         add_output_arguments(parser)
 
     def get_app(self, args: argparse.Namespace) -> AbstractWebcamFilterApp:
-        return ReplaceBackgroundApp(args)
+        return BodgedReplaceBackgroundApp(args)
 
 
 SUB_COMMANDS: List[SubCommand] = [
